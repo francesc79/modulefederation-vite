@@ -9,7 +9,7 @@
  * 2. __loadShare__: load shareModule (mfRuntime.loadShare('vue'))
  */
 
-import { existsSync, readFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
 import { createRequire } from 'module';
 import path from 'pathe';
 import { mfWarn } from '../utils/logger';
@@ -207,15 +207,16 @@ function getPackageNamedExports(pkg: string): string[] {
 }
 
 export function getLocalProviderImportPath(pkg: string): string | undefined {
+  let resolved: string | undefined;
   try {
     const projectRequire = createRequire(
       new URL(`file://${path.join(getPackageDetectionCwd(), 'package.json')}`)
     );
-    const resolved = projectRequire.resolve(pkg);
-    return isWorkspaceFilePath(resolved) ? resolved : undefined;
+    resolved = projectRequire.resolve(pkg);
   } catch {
-    return undefined;
+    resolved = getPackageEsmEntryPath(pkg);
   }
+  return getWorkspaceFilePath(resolved);
 }
 
 export function getProjectResolvedImportPath(pkg: string): string | undefined {
@@ -240,11 +241,26 @@ function isWorkspaceFilePath(resolved: string | undefined): resolved is string {
   );
 }
 
+function getRealFilePath(resolved: string | undefined): string | undefined {
+  if (!resolved) return undefined;
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function getWorkspaceFilePath(resolved: string | undefined): string | undefined {
+  const realPath = getRealFilePath(resolved);
+  return isWorkspaceFilePath(realPath) ? realPath : undefined;
+}
+
 function isWorkspacePackageEntry(pkg: string, resolved: string | undefined): resolved is string {
-  if (!resolved || !path.isAbsolute(resolved) || !isWorkspaceFilePath(resolved)) return false;
+  const workspacePath = getWorkspaceFilePath(resolved);
+  if (!workspacePath || !path.isAbsolute(workspacePath)) return false;
   return !!getInstalledPackageJson(pkg, {
     packageName: getPackageName(pkg),
-    fromResolvedEntry: resolved,
+    fromResolvedEntry: workspacePath,
   });
 }
 
@@ -424,7 +440,8 @@ export function writeLoadShareModule(
     exportLine = `export default exportModule.default ?? exportModule\n    export * from ${escapeGeneratedStringLiteral(sharedImportSource)}`;
   }
 
-  const usesLazyLocalFallback = isWorkspacePackage && shareItem.shareConfig.singleton === true;
+  const usesLazyLocalFallback =
+    shareItem.shareConfig.singleton === true && (isWorkspacePackage || command === 'build');
   const staticLocalShareSource = skipServePrebuildWarmup ? devImportSource : sharedImportSource;
   const prebuildImportLine =
     usesLazyLocalFallback || (isWorkspacePackage && command !== 'build')

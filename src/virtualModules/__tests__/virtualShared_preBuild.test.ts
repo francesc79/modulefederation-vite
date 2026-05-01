@@ -76,6 +76,9 @@ vi.mock('../../utils/packageUtils', () => ({
     if (pkg === 'workspace-shared-lib') {
       return '/repo/packages/workspace-shared-lib/src/index.tsx';
     }
+    if (pkg === 'workspace-esm-only-lib') {
+      return '/repo/apps/remote/node_modules/workspace-esm-only-lib/src/index.ts';
+    }
   }),
   getInstalledPackageJson: vi.fn((pkg: string, opts?: { fromResolvedEntry?: string }) => {
     if (opts?.fromResolvedEntry?.includes('/repo/packages/workspace-shared-lib/')) {
@@ -83,6 +86,13 @@ vi.mock('../../utils/packageUtils', () => ({
         path: '/repo/packages/workspace-shared-lib/package.json',
         dir: '/repo/packages/workspace-shared-lib',
         packageJson: { name: 'workspace-shared-lib' },
+      };
+    }
+    if (opts?.fromResolvedEntry?.includes('/repo/packages/workspace-esm-only-lib/')) {
+      return {
+        path: '/repo/packages/workspace-esm-only-lib/package.json',
+        dir: '/repo/packages/workspace-esm-only-lib',
+        packageJson: { name: 'workspace-esm-only-lib' },
       };
     }
     if (pkg === 'mock-package-browser-conditional') {
@@ -149,7 +159,15 @@ vi.mock('fs', () => ({
       filePath.endsWith('node_modules/mock-package-browser-conditional/dist/server.js') ||
       filePath.endsWith('/mock-package-browser-conditional/dist/server.js') ||
       filePath.endsWith('/repo/packages/workspace-shared-lib/package.json') ||
+      filePath.endsWith('/repo/packages/workspace-esm-only-lib/package.json') ||
+      filePath.endsWith('/repo/apps/remote/node_modules/workspace-esm-only-lib/package.json') ||
       filePath.endsWith('/repo/packages/workspace-name-mismatch/package.json')
+  ),
+  realpathSync: vi.fn((filePath: string) =>
+    filePath.replace(
+      '/repo/apps/remote/node_modules/workspace-esm-only-lib',
+      '/repo/packages/workspace-esm-only-lib'
+    )
   ),
   readFileSync: vi.fn((filePath: string) => {
     if (
@@ -287,6 +305,28 @@ export { type, other } from './foo';`;
     if (filePath.endsWith('/repo/packages/workspace-shared-lib/package.json')) {
       return JSON.stringify({ name: 'workspace-shared-lib' });
     }
+    if (filePath.endsWith('/repo/packages/workspace-esm-only-lib/package.json')) {
+      return JSON.stringify({
+        name: 'workspace-esm-only-lib',
+        type: 'module',
+        exports: {
+          '.': {
+            import: './src/index.ts',
+          },
+        },
+      });
+    }
+    if (filePath.endsWith('/repo/apps/remote/node_modules/workspace-esm-only-lib/package.json')) {
+      return JSON.stringify({
+        name: 'workspace-esm-only-lib',
+        type: 'module',
+        exports: {
+          '.': {
+            import: './src/index.ts',
+          },
+        },
+      });
+    }
     if (filePath.endsWith('/repo/packages/workspace-name-mismatch/package.json')) {
       return JSON.stringify({ name: 'different-package-name' });
     }
@@ -418,6 +458,11 @@ vi.mock('module', async (importOriginal) => {
           if (pkg === 'workspace-shared-lib') {
             return '/repo/packages/workspace-shared-lib/src/index.tsx';
           }
+          if (pkg === 'workspace-esm-only-lib') {
+            const error = new Error('ERR_PACKAGE_PATH_NOT_EXPORTED');
+            (error as Error & { code?: string }).code = 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+            throw error;
+          }
           if (pkg === 'workspace-name-mismatch') {
             return '/repo/packages/workspace-name-mismatch/src/index.ts';
           }
@@ -511,9 +556,40 @@ describe('writeLoadShareModule', () => {
 
     expect(generatedCode).toContain('const __mfCacheGlobalKey =');
     expect(generatedCode).toContain('__mfModuleCache.share["mock-package-with-reserved"]');
-    expect(generatedCode).not.toContain('await ');
+    expect(generatedCode).toContain(
+      'exportModule = await import("/resolved/mock-package-with-reserved");'
+    );
     expect(generatedCode).not.toContain('import { initPromise } from');
     expect(generatedCode).not.toContain('require("mock-import-id")');
+  });
+
+  it('does not emit eager side-effect imports for non-workspace singletons in build mode', () => {
+    const pkg = 'mock-package-browser-conditional';
+    const mockShareItem: ShareItem = {
+      name: pkg,
+      from: '',
+      version: '1.0.0',
+      shareConfig: {
+        singleton: true,
+        strictVersion: false,
+        requiredVersion: '^1.0.0',
+      },
+      scope: 'default',
+    };
+
+    writeLoadShareModule(pkg, mockShareItem, 'build', false);
+
+    const generatedCode = writeSyncSpy.mock.calls.at(-1)?.[0] as string;
+
+    expect(generatedCode).not.toContain('import * as __mfLocalShare');
+    expect(generatedCode).not.toContain('exportModule = __mfLocalShare;');
+    expect(generatedCode).toContain(
+      'let exportModule = __mfModuleCache.share["mock-package-browser-conditional"]'
+    );
+    expect(generatedCode).toContain('exportModule = await import("mock-import-id");');
+    expect(generatedCode).toContain(
+      '__mfModuleCache.share["mock-package-browser-conditional"] = exportModule;'
+    );
   });
 
   it('unwraps default exports for shared ESM modules', () => {
@@ -556,7 +632,8 @@ describe('writeLoadShareModule', () => {
 
     const generatedCode = writeSyncSpy.mock.calls.at(-1)?.[0] as string;
 
-    expect(generatedCode).toContain('import * as __mfLocalShare from "/abs/pkg-b/dist/index.js";');
+    expect(generatedCode).not.toContain('import * as __mfLocalShare');
+    expect(generatedCode).toContain('exportModule = await import("/abs/pkg-b/dist/index.js");');
     expect(generatedCode).toContain('export * from "/abs/pkg-b/dist/index.js"');
     expect(generatedCode).not.toContain('import "mock-import-id";');
   });
@@ -583,7 +660,7 @@ describe('writeLoadShareModule', () => {
 
     expect(generatedCode).toContain('__mfModuleCache.share["react"]');
     expect(generatedCode).not.toContain('providerModulePromise');
-    expect(generatedCode).not.toContain('await ');
+    expect(generatedCode).toContain('exportModule = await import("/resolved/react");');
   });
 
   it('falls back to parsing ESM exports when require() cannot load the shared package', () => {
@@ -815,8 +892,9 @@ describe('writeLoadShareModule', () => {
 
     const generatedCode = writeSyncSpy.mock.calls.at(-1)?.[0] as string;
 
+    expect(generatedCode).not.toContain('import * as __mfLocalShare');
     expect(generatedCode).toContain(
-      'import * as __mfLocalShare from "/repo/packages/pkg-b/dist/index.js";'
+      'exportModule = await import("/repo/packages/pkg-b/dist/index.js");'
     );
     expect(generatedCode).toContain('export * from "/repo/packages/pkg-b/dist/index.js"');
     expect(generatedCode).not.toContain('import "mock-import-id";');
@@ -969,6 +1047,39 @@ describe('writeLoadShareModule', () => {
     expect(generatedCode).not.toContain('__mfLocalShare');
   });
 
+  it('does not emit eager side-effect imports for ESM-only workspace singletons behind node_modules symlinks', () => {
+    const pkg = 'workspace-esm-only-lib';
+    const mockShareItem: ShareItem = {
+      name: pkg,
+      from: '',
+      version: '1.0.0',
+      shareConfig: {
+        singleton: true,
+        strictVersion: false,
+        requiredVersion: '^1.0.0',
+      },
+      scope: 'default',
+    };
+
+    writeLoadShareModule(pkg, mockShareItem, 'build', false);
+
+    const generatedCode = writeSyncSpy.mock.calls.at(-1)?.[0] as string;
+
+    expect(generatedCode).not.toContain(
+      'import * as __mfLocalShare from "/repo/apps/remote/node_modules/workspace-esm-only-lib/src/index.ts";'
+    );
+    expect(generatedCode).not.toContain('exportModule = __mfLocalShare;');
+    expect(generatedCode).toContain(
+      'let exportModule = __mfModuleCache.share["workspace-esm-only-lib"]'
+    );
+    expect(generatedCode).toContain(
+      'exportModule = await import("/repo/packages/workspace-esm-only-lib/src/index.ts");'
+    );
+    expect(generatedCode).toContain(
+      '__mfModuleCache.share["workspace-esm-only-lib"] = exportModule;'
+    );
+  });
+
   it('does not treat parent package.json name mismatches as workspace package matches', () => {
     const pkg = 'workspace-name-mismatch';
     const mockShareItem: ShareItem = {
@@ -987,10 +1098,10 @@ describe('writeLoadShareModule', () => {
 
     const generatedCode = writeSyncSpy.mock.calls.at(-1)?.[0] as string;
 
-    expect(generatedCode).toContain('import * as __mfLocalShare from "mock-import-id";');
-    expect(generatedCode).toContain('exportModule = __mfLocalShare;');
-    expect(generatedCode).not.toContain(
-      'await import("/repo/packages/workspace-name-mismatch/src/index.ts")'
+    expect(generatedCode).not.toContain('import * as __mfLocalShare');
+    expect(generatedCode).not.toContain('exportModule = __mfLocalShare;');
+    expect(generatedCode).toContain(
+      'exportModule = await import("/repo/packages/workspace-name-mismatch/src/index.ts");'
     );
   });
 
