@@ -270,8 +270,33 @@ describe('virtualRemoteEntry', () => {
     );
     // Shim must appear before any imports so it's defined when component code executes
     const shimIndex = code.indexOf('__VUE_HMR_RUNTIME__');
-    const importIndex = code.indexOf('import {createInstance');
+    const importIndex = code.indexOf('import {init as runtimeInit');
     expect(shimIndex).toBeLessThan(importIndex);
+  });
+
+  it('initializes remoteEntry through runtime init so getInstance can retrieve the host instance', async () => {
+    const mod = await import('../virtualRemoteEntry');
+
+    const code = mod.generateRemoteEntry(
+      {
+        internalName: '__mfe_internal__host',
+        name: 'host',
+        filename: 'remoteEntry.js',
+        remotes: {},
+        runtimePlugins: [],
+        shareScope: 'default',
+        shareStrategy: 'version-first',
+      } as any,
+      'virtual:exposes',
+      'serve'
+    );
+
+    expect(code).toContain(
+      'import {init as runtimeInit, loadRemote} from "@module-federation/runtime";'
+    );
+    expect(code).toContain('const initRes = runtimeInit({');
+    expect(code).not.toContain('createInstance');
+    expect(code).not.toContain('let runtimeInstance');
   });
 
   it('retries transient shared init module loading failures in serve remoteEntry', async () => {
